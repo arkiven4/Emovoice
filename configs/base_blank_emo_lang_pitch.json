@@ -20,7 +20,7 @@
     "batch_size": 12,
     "ddi": false,
     "fp16_run": false,
-    "warm_start": true,
+    "warm_start": false,
     "warm_start_checkpoint": "logs/base_blank_emo_lang_pitch/G_83.pth",
     "ignored_layer": []
   },
