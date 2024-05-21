@@ -102,6 +102,7 @@ class FastPitch(nn.Module):
     def __init__(self,
             # io
             n_mel_channels=80,
+            n_lang=0,
             # symbols
             symbol_type='char',
             n_symbols=148,
@@ -159,11 +160,11 @@ class FastPitch(nn.Module):
             energy_embedding_sepconv=False,
             # speakers parameters
             speaker_ids=None,
-            speaker_cond='pre',
+            speaker_cond=['pre'],
             speaker_emb_dim=384,
             speaker_emb_weight=1.0,
             lang_ids=None,
-            lang_cond='pre',
+            lang_cond=['pre'],
             lang_emb_dim=384,
             lang_emb_weight=1.0):
         
@@ -191,7 +192,7 @@ class FastPitch(nn.Module):
         self.speaker_emb_weight = speaker_emb_weight
 
         self.lang_cond = lang_cond
-        self.lang_emb = nn.Embedding(len(self.lang_ids), symbols_embedding_dim)
+        self.lang_emb = nn.Embedding(n_lang, symbols_embedding_dim)
         self.lang_emb_weight = lang_emb_weight
 
         self.duration_predictor = TemporalPredictor(

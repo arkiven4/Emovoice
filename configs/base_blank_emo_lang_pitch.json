@@ -4,8 +4,8 @@
     "log_interval": 20,
     "seed": 1234,
     "epochs": 10000,
-    "epochs_per_checkpoint": 5,
-    "learning_rate": 5e-4,
+    "epochs_per_checkpoint": 15,
+    "learning_rate": 0.1,
     "betas": [0.8, 0.99],
     "eps": 1e-9,
     "weight_decay": 1e-6,
@@ -17,7 +17,7 @@
     "grad_clip_thresh": 1000.0,
     "distributed_run": false,
     "num_gpus": 1,
-    "batch_size": 12,
+    "batch_size": 32,
     "ddi": false,
     "fp16_run": false,
     "warm_start": false,
@@ -42,9 +42,9 @@
     "cleaned_text": false,
     "n_speakers": 109,
     "n_lang": 10,
-    "spk_embeds_path": "/run/media/viblab/Markov2/Pras/Thesis/Database/dataset_name/spk_embeds/",
-    "emo_embeds_path": "/run/media/viblab/Markov2/Pras/Thesis/Database/dataset_name/emo_embeds/",
-    "f0_embeds_path": "/run/media/viblab/Markov2/Pras/Thesis/Database/dataset_name/f0_straight/",
+    "spk_embeds_path": "/run/media/fourier/Data2/Pras/Thesis/Database/dataset_name/spk_embeds/",
+    "emo_embeds_path": "/run/media/fourier/Data2/Pras/Thesis/Database/dataset_name/emo_embeds/",
+    "f0_embeds_path": "/run/media/fourier/Data2/Pras/Thesis/Database/dataset_name/f0_straight/",
     "database_name_index": 8
   },
   "model": {
@@ -98,10 +98,10 @@
     "energy_embedding_kernel_size": 3,
     "energy_embedding_sepconv": false,
 
-    "speaker_cond": "pre",
-    "speaker_emb_dim": 384,
+    "speaker_cond": ["pre"],
+    "speaker_emb_dim": 512,
     "speaker_emb_weight": 1.0,
-    "lang_cond": "pre",
+    "lang_cond": ["pre"],
     "lang_emb_dim": 384,
     "lang_emb_weight": 1.0
   }

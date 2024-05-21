@@ -34,6 +34,7 @@ from itertools import groupby
 import librosa
 import numpy as np
 import torch
+import torch.nn.functional as F
 from scipy import ndimage
 from scipy.stats import betabinom
 
@@ -160,7 +161,7 @@ class TextMelAliLoader(torch.utils.data.Dataset):
         self.database_name_index = hparams.database_name_index
 
         random.seed(1234)
-        random.shuffle(self.audiopaths_lid_text)
+        random.shuffle(self.audiopaths_and_text)
 
         self.input_type = input_type
         self.symbol_set = None
@@ -214,10 +215,9 @@ class TextMelAliLoader(torch.utils.data.Dataset):
                 self.sampling_rate, self.hop_length)
 
         speaker = torch.Tensor(np.load(f"{self.spk_embeds_path.replace('dataset_name', database_name)}/{filename}.npy"))
-
         lang = self.get_lid(lid)
 
-        return text, mel, len(text), dur, pitch, energy, speaker, lang
+        return text, mel, len(text), torch.from_numpy(dur), pitch, energy, speaker, lang, audiopath
 
     def get_mel(self, filename):
         if self.load_mel_from_disk:
@@ -234,7 +234,7 @@ class TextMelAliLoader(torch.utils.data.Dataset):
             audio_norm = torch.autograd.Variable(audio_norm, requires_grad=False)
             melspec, energy = self.stft.mel_spectrogram(audio_norm)
             melspec = torch.squeeze(melspec, 0)
-            energy = torch.squeeze(energy, 0).numpy()
+            energy = torch.squeeze(energy, 0)
         return melspec, energy
 
     def get_text(self, text, lang):
@@ -244,7 +244,7 @@ class TextMelAliLoader(torch.utils.data.Dataset):
     def get_duration(self, text=None, mel_len=None, utt_id=None):
         start_time, end_time = None, None
         durations = extract_duration_prior(len(text), mel_len)
-        text = self.tp.ids_to_text(text.numpy())
+        #text = self.tp.ids_to_text(text.numpy())
 
         return durations, text, start_time, end_time
 
@@ -256,8 +256,10 @@ class TextMelAliLoader(torch.utils.data.Dataset):
 
         filename = audiopath.split("/")[-1].split(".")[0]
         database_name = audiopath.split("/")[self.database_name_index]
-        pitch = np.load(f"{self.f0_embeds_path.replace('dataset_name', database_name)}/{filename}.npy")
+        pitch = torch.from_numpy(np.load(f"{self.f0_embeds_path.replace('dataset_name', database_name)}/{filename}.npy"))
         pitch = pitch[:mel_len]
+        if pitch.shape[0] < mel_len:
+            pitch = F.pad(input=pitch, pad=(0, mel_len - pitch.shape[0]), mode='constant', value=0)
 
         if self.pitch_mean is not None:
             assert self.pitch_std is not None
@@ -366,6 +368,7 @@ class TextMelAliCollate():
         # Right zero-pad all one-hot text sequences to max input length
         input_lengths, ids_sorted_decreasing = torch.sort(torch.LongTensor([len(x[0]) for x in batch]), dim=0, descending=True)
         max_input_len = input_lengths[0]
+        audiopath = [batch[i][-1] for i in ids_sorted_decreasing]
 
         text_padded = torch.LongTensor(len(batch), max_input_len)
         text_padded.zero_()
@@ -385,8 +388,7 @@ class TextMelAliCollate():
             mel_padded[i, :, :mel.size(1)] = mel
             output_lengths[i] = mel.size(1)
 
-        dur_padded = torch.zeros(
-            len(batch), max_target_len, max_input_len)
+        dur_padded = torch.zeros(len(batch), max_target_len, max_input_len)
         dur_padded.zero_()
         dur_lens = None
         for i in range(len(ids_sorted_decreasing)):
@@ -403,7 +405,7 @@ class TextMelAliCollate():
             energy = batch[ids_sorted_decreasing[i]][5]
             energy_padded[i, :energy.shape[0]] = energy
 
-        speaker = torch.zeros((len(batch), batch[0][6].shape[1]))
+        speaker = torch.zeros((len(batch), batch[0][6].shape[0]))
         for i in range(len(ids_sorted_decreasing)):
             speaker[i] = batch[ids_sorted_decreasing[i]][6]
 
@@ -416,12 +418,12 @@ class TextMelAliCollate():
         len_x = torch.Tensor(len_x)
 
         return (text_padded, input_lengths, mel_padded, output_lengths,
-                len_x, dur_padded, dur_lens, pitch_padded, energy_padded, speaker, lang)
+                len_x, dur_padded, dur_lens, pitch_padded, energy_padded, speaker, lang, audiopath)
 
 
 def batch_to_gpu(batch, symbol_type='char', mas=False):
     text_padded, input_lengths, mel_padded, output_lengths, \
-        len_x, dur_padded, dur_lens, pitch_padded, energy_padded, speaker, lang = batch
+        len_x, dur_padded, dur_lens, pitch_padded, energy_padded, speaker, lang, audiopath = batch
 
     input_lengths = to_gpu(input_lengths).long()
     mel_padded = to_gpu(mel_padded).float()

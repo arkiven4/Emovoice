@@ -1,0 +1,2 @@
+source /run/media/fourier/Data2/Pras/Thesis/TryModel/efficient-vits-finetuning/.env/bin/activate
+TORCH_DISTRIBUTED_DEBUG=DETAIL python train.py -c configs/base_blank_emo_lang_pitch.json -m base_blank_emo_lang_pitch

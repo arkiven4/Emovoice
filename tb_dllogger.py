@@ -113,11 +113,17 @@ def init(log_fpath, log_dir, enabled=True, tb_subsets=[], **tb_kw):
 
     if enabled:
         backends = [JSONStreamBackend(Verbosity.DEFAULT,
-                                      unique_log_fpath(log_fpath)),
+                                      log_fpath),
                     StdOutBackend(Verbosity.VERBOSE,
                                   step_format=stdout_step_format,
                                   metric_format=stdout_metric_format,
                                   prefix_format=prefix_format)]
+        # backends = [JSONStreamBackend(Verbosity.DEFAULT,
+        #                               log_fpath),]
+                    # StdOutBackend(Verbosity.VERBOSE,
+                    #               step_format=stdout_step_format,
+                    #               metric_format=stdout_metric_format,
+                    #               prefix_format=prefix_format)]
     else:
         backends = []
 
@@ -157,7 +163,7 @@ def init(log_fpath, log_dir, enabled=True, tb_subsets=[], **tb_kw):
 
     timestamp = datetime.datetime.now().strftime('%Y-%m-%dT%H.%M.%S')
     global tb_loggers
-    tb_loggers = {s: TBLogger(enabled, log_dir, name=os.path.join(s, timestamp), **tb_kw)
+    tb_loggers = {s: TBLogger(enabled, log_dir, name=os.path.join(s), **tb_kw)
                   for s in tb_subsets}
 
 

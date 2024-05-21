@@ -33,13 +33,19 @@ from data_utils import batch_to_gpu, TextMelAliCollate, TextMelAliLoader
 import models
 import commons
 import utils
-from text.symbols import symbols
+
+import sys
+sys.path.append('./BigVGAN_/')
+
+from BigVGAN_.env import AttrDict
+from BigVGAN_.meldataset import MAX_WAV_VALUE
+from BigVGAN_.models import BigVGAN as Generator
 
 global_step = 0
 global_tqdm = None
 
 def log_stdout(logger, subset, epoch_iters, total_steps, loss, mel_loss,
-               dur_loss, pitch_loss, energy_loss, align_loss, took):
+               dur_loss, pitch_loss, energy_loss, align_loss, took, now_lr=None):
     logger_data = [
         ('Loss/Total', loss),
         ('Loss/Mel', mel_loss),
@@ -60,6 +66,8 @@ def log_stdout(logger, subset, epoch_iters, total_steps, loss, mel_loss,
             #('Align/KL weight', iter_kl_weight),  # step, not avg
         ])
     logger_data.append(('Time/Iter time', took))
+    if now_lr != None:
+        logger_data.append(('Parameter/Learning Rate', now_lr))
     logger.log(epoch_iters,
                tb_total_steps=total_steps,
                subset=subset,
@@ -67,8 +75,12 @@ def log_stdout(logger, subset, epoch_iters, total_steps, loss, mel_loss,
     )
 
 
-def plot_spectrograms(y, fnames, sorted_idx, step, n=4, label='Predicted spectrogram', mas=False):
+def plot_spectrograms(y, audiopaths, sorted_idx, step, n=4, label='Predicted spectrogram', mas=False):
     """Plot spectrograms for n utterances in batch"""
+    fnames = []
+    for idx_loop, audiopath in enumerate(audiopaths):
+        fnames.append(os.path.splitext(os.path.basename(audiopath))[0])
+    
     bs = len(fnames)
     n = min(n, bs)
     s = bs // n
@@ -92,41 +104,55 @@ def plot_spectrograms(y, fnames, sorted_idx, step, n=4, label='Predicted spectro
             step, '{}/{}'.format(label, utt_id), mel_spec, tb_subset='val')
 
 
-def generate_audio(y, fnames, sorted_idx, step, vocoder=None, sampling_rate=22050, hop_length=256,
+def generate_audio(y, audiopaths, sorted_idx, step, vocoder=None, sampling_rate=22050, hop_length=256,
                    n=4, label='Predicted audio', mas=False, dataset_path=''):
     """Generate audio from spectrograms for n utterances in batch"""
+    fnames = []
+    for idx_loop, audiopath in enumerate(audiopaths):
+        fnames.append(os.path.splitext(os.path.basename(audiopath))[0])
+
     bs = len(fnames)
     n = min(n, bs)
     s = bs // n
     idx = sorted_idx[::s]
     fnames = [fnames[i] for i in idx]
+    audiopaths = [audiopaths[i] for i in idx]
     with torch.no_grad():
         if label == 'Predicted audio':
             # y: mel_out, dec_mask, dur_pred, log_dur_pred, pitch_pred
-            audios = vocoder(y[0][idx].transpose(1, 2)).cpu().squeeze().numpy()
+            audios = vocoder(torch.FloatTensor(y[0][idx].transpose(1, 2).cpu().detach().numpy()).to('cpu')).cpu().squeeze().numpy()
+            #audios = vocoder(y[0][idx].transpose(1, 2)).cpu().squeeze().numpy()
             mel_lens = y[1][idx].squeeze().cpu().numpy().sum(axis=1) - 1
         else:
             # y: mel_padded, dur_padded, dur_lens, pitch_padded
             if label == 'Copy synthesis':
-                audios = vocoder(y[0][idx]).cpu().squeeze().numpy()
+                audios = vocoder(torch.FloatTensor(y[0][idx].cpu().detach().numpy()).to('cpu')).cpu().squeeze().numpy()
+                #audios = vocoder(y[0][idx]).cpu().squeeze().numpy()
             elif label == 'Reference audio':
                 audios = []
-                for fname in fnames:
-                    wav = os.path.join(dataset_path, 'wavs/{}.wav'.format(fname))
-                    audio, _ = librosa.load(wav, sr=sampling_rate)
+                for audiopath in audiopaths:
+                    audio, _ = librosa.load(audiopath, sr=sampling_rate)
                     audios.append(audio)
             if mas:
                 mel_lens = y[2][idx].cpu().numpy()  # output_lengths
             else:
                 mel_lens = y[1][idx].cpu().numpy().sum(axis=1) - 1
+
+
+    index = 0
     for audio, mel_len, fname in zip(audios, mel_lens, fnames):
+        index = index + 1
         audio = audio[:mel_len * hop_length]
         audio = audio / np.max(np.abs(audio))
         logger.log_audio_tb(
-            step, '{}/{}'.format(label, fname), audio, sampling_rate, tb_subset='val')
+            step, '{}/{}'.format(label, "Audio_" + str(index)), audio, sampling_rate, tb_subset='val')
 
 
-def plot_attn_maps(y, fnames, sorted_idx, step, n=4, label='Predicted alignment'):
+def plot_attn_maps(y, audiopaths, sorted_idx, step, n=4, label='Predicted alignment'):
+    fnames = []
+    for idx_loop, audiopath in enumerate(audiopaths):
+        fnames.append(os.path.splitext(os.path.basename(audiopath))[0])
+
     bs = len(fnames)
     n = min(n, bs)
     s = bs // n
@@ -228,7 +254,7 @@ def validate(model, epoch, total_iter, criterion, valset, batch_size, collate_fn
             loss, meta = criterion(y_pred, y, is_training=False, meta_agg='sum')
 
             if mas:
-                _, _, _, _, _, _, attn_soft, attn_hard, _, _ = y_pred
+                _, _, _, _, _, _, _, _, attn_soft, attn_hard, _, _ = y_pred
                 binarization_loss = attention_kl_loss(attn_hard, attn_soft)
                 kl_loss = binarization_loss * kl_weight
                 loss += kl_loss
@@ -247,7 +273,7 @@ def validate(model, epoch, total_iter, criterion, valset, batch_size, collate_fn
 
             # log spectrograms and generated audio for first few utterances
             if (i == 0) and (epoch % audio_interval == 0 if epoch is not None else True):
-                fnames = batch[-1]
+                audiopaths = batch[-1]
                 # reorder utterances by mel length
                 if mas:
                     tgt_mel_lens = y[2]
@@ -259,26 +285,25 @@ def validate(model, epoch, total_iter, criterion, valset, batch_size, collate_fn
                 if epoch == audio_interval:
                     # plot ref and copy synthesis only on first epoch
                     plot_spectrograms(
-                        y, fnames, tgt_mel_lens_sorted_idx, total_iter,
+                        y, audiopaths, tgt_mel_lens_sorted_idx, total_iter,
                         n=4, label='Reference spectrogram', mas=mas)
                     if vocoder is not None:
-                        generate_audio(y, fnames, tgt_mel_lens_sorted_idx, total_iter,
+                        generate_audio(y, audiopaths, tgt_mel_lens_sorted_idx, total_iter,
                                        vocoder, sampling_rate, hop_length,
-                                       n=4, label='Reference audio', mas=mas,
-                                       dataset_path=valset.dataset_path)
-                        generate_audio(y, fnames, tgt_mel_lens_sorted_idx, total_iter,
+                                       n=2, label='Reference audio', mas=mas)
+                        generate_audio(y, audiopaths, tgt_mel_lens_sorted_idx, total_iter,
                                        vocoder, sampling_rate, hop_length,
-                                       n=4, label='Copy synthesis', mas=mas)
+                                       n=2, label='Copy synthesis', mas=mas)
                 plot_spectrograms(
-                    y_pred, fnames, tgt_mel_lens_sorted_idx, total_iter,
+                    y_pred, audiopaths, tgt_mel_lens_sorted_idx, total_iter,
                     n=4, label='Predicted spectrogram', mas=mas)
                 if vocoder is not None:
-                    generate_audio(y_pred, fnames, tgt_mel_lens_sorted_idx, total_iter,
-                                   vocoder, sampling_rate, hop_length, n=4,
+                    generate_audio(y_pred, audiopaths, tgt_mel_lens_sorted_idx, total_iter,
+                                   vocoder, sampling_rate, hop_length, n=2,
                                    label='Predicted audio', mas=mas)
                 if mas:
                     plot_attn_maps(
-                        y_pred, fnames, tgt_mel_lens_sorted_idx, total_iter,
+                        y_pred, audiopaths, tgt_mel_lens_sorted_idx, total_iter,
                         n=4, label='Predicted alignment')
 
         val_meta = {k: v / len(valset) for k, v in val_meta.items()}
@@ -341,11 +366,25 @@ def train_and_eval(rank, n_gpus, hps):
         batch_size=int(hps.train.batch_size / 1),
         pin_memory=False, drop_last=True, collate_fn=collate_fn)
     
-    model = models.FastPitch(n_mel_channels=hps.data.n_mel_channels, n_symbols=trainset.n_symbols, padding_idx=trainset.padding_idx, **hps.model).cuda(rank)
+    model = models.FastPitch(n_mel_channels=hps.data.n_mel_channels, n_lang=hps.data.n_lang, n_symbols=trainset.n_symbols, padding_idx=trainset.padding_idx, **hps.model).cuda(rank)
 
     if hasattr(model, 'forward_mas'):
         print("Using MAS")
         model.forward = model.forward_mas
+
+    vocoder_config_file = os.path.join("BigVGAN_/cp_model", 'config.json')
+    with open(vocoder_config_file) as f:
+        vocoder_data_c = f.read()
+
+    vocoder_json_config = json.loads(vocoder_data_c)
+    vocoder_h = AttrDict(vocoder_json_config)
+
+    vocoder = Generator(vocoder_h).to('cpu')
+    state_dict_vocoder = torch.load("BigVGAN_/cp_model/g_05000000.zip", map_location="cpu")
+    vocoder.load_state_dict(state_dict_vocoder['generator'])
+    vocoder.eval()
+    vocoder.remove_weight_norm()
+    print("Succcess Load Vocoder")
 
     kw = dict(lr=hps.train.learning_rate, betas=(0.9, 0.98), eps=1e-9, weight_decay=hps.train.learning_rate)
     if hps.train.optimizer == 'adam':
@@ -367,8 +406,9 @@ def train_and_eval(rank, n_gpus, hps):
     else:
         try:
             utils.load_checkpoint(model, ema_model, optimizer, scaler,
-                        start_epoch, start_iter, hps.train.fp16_run, utils.latest_checkpoint_path(hps.model_dir, "G_*.pth"))
+                        start_epoch, start_iter, hps.train.fp16_run, utils.latest_checkpoint_path(hps.model_dir, "fastpitch_*.pt"))
         except Exception as e:
+            print("Not Found Checkpoint")
             print(e)
 
     start_epoch = start_epoch[0]
@@ -404,7 +444,7 @@ def train_and_eval(rank, n_gpus, hps):
         epoch_num_frames = 0
         epoch_frames_per_sec = 0.0
 
-        train_loader.sampler.set_epoch(epoch)
+        #train_loader.sampler.set_epoch(epoch)
 
         accumulated_steps = 0
         iter_loss = 0
@@ -431,10 +471,10 @@ def train_and_eval(rank, n_gpus, hps):
             with autocast(enabled=hps.train.fp16_run):
                 y_pred = model(x, use_gt_durations=True)
                 loss, meta = criterion(y_pred, y)
-                
+
                 if True:
                     if epoch >= hps.train.kl_loss_start_epoch:
-                        _, _, _, _, _, _, attn_soft, attn_hard, _, _ = y_pred
+                        _, _, _, _, _, _, _, _, attn_soft, attn_hard, _, _ = y_pred
                         binarization_loss = attention_kl_loss(attn_hard, attn_soft)
                         kl_weight = torch.tensor(
                             min((epoch - hps.train.kl_loss_start_epoch) / hps.train.kl_loss_warmup_epochs,
@@ -525,7 +565,8 @@ def train_and_eval(rank, n_gpus, hps):
                            iter_pitch_loss,
                            iter_energy_loss,
                            None if not True else iter_align_loss,
-                           iter_time
+                           iter_time,
+                           optimizer.param_groups[0]["lr"]
                 )
 
                 accumulated_steps = 0
@@ -546,15 +587,17 @@ def train_and_eval(rank, n_gpus, hps):
                    epoch_pitch_loss / epoch_iter,
                    epoch_energy_loss / epoch_iter,
                    None if not True else epoch_align_loss / epoch_iter,
-                   epoch_time
+                   epoch_time,
+                   optimizer.param_groups[0]["lr"]
         )
 
         validate(model, epoch, total_iter, criterion, valset, hps.train.batch_size,
             collate_fn, hps.train.distributed_run, batch_to_gpu, use_gt_durations=True,
             mas=True, attention_kl_loss=attention_kl_loss, kl_weight=kl_weight,
-            vocoder=None, sampling_rate=hps.data.sampling_rate, hop_length=hps.data.hop_length,
-            n_mel=hps.data.n_mel_channels, tvcgmm_k=0, audio_interval=5)
+            vocoder=vocoder, sampling_rate=hps.data.sampling_rate, hop_length=hps.data.hop_length,
+            n_mel=hps.data.n_mel_channels, tvcgmm_k=0, audio_interval=1)
 
+        print("====> Epoch: {}".format(epoch))
         maybe_save_checkpoint(rank, model, ema_model, optimizer, scaler, epoch, total_iter, hps, hps)
         logger.flush()
 
@@ -575,7 +618,7 @@ def train_and_eval(rank, n_gpus, hps):
     validate(model, None, total_iter, criterion, valset, hps.train.batch_size,
         collate_fn, hps.train.distributed_run, batch_to_gpu, use_gt_durations=True,
         mas=True, attention_kl_loss=attention_kl_loss, kl_weight=kl_weight,
-        vocoder=None, sampling_rate=hps.data.sampling_rate, hop_length=hps.data.hop_length,
+        vocoder=vocoder, sampling_rate=hps.data.sampling_rate, hop_length=hps.data.hop_length,
         n_mel=hps.data.n_mel_channels, tvcgmm_k=0)
 
 if __name__ == "__main__":
