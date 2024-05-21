@@ -216,19 +216,23 @@ def main():
     """Assume Single Node Multi GPUs Training Only"""
     assert torch.cuda.is_available(), "CPU training is not allowed."
 
-    n_gpus = torch.cuda.device_count()
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = "65530"
-
+    
     hps = utils.get_hparams()
-    mp.spawn(
-        train_and_eval,
-        nprocs=n_gpus,
-        args=(
-            n_gpus,
+    torch.manual_seed(hps.train.seed)
+    np.random.seed(hps.train.seed)
+
+    hps.train.num_gpus = torch.cuda.device_count()
+    hps.train.batch_size = int(hps.train.batch_size / hps.train.num_gpus)
+
+    if hps.train.distributed_run:
+        mp.spawn(train_and_eval, nprocs=hps.train.num_gpus, args=(
+            hps.train.num_gpus,
             hps,
-        ),
-    )
+        ))
+    else:
+        train_and_eval(0, hps.train.num_gpus, hps)
 
 def validate(model, epoch, total_iter, criterion, valset, batch_size, collate_fn,
              distributed_run, batch_to_gpu, use_gt_durations=False, ema=False,
@@ -396,7 +400,7 @@ def train_and_eval(rank, n_gpus, hps):
     ema_model = None
     if hps.train.distributed_run:
         model = DistributedDataParallel(
-            model, device_ids=[rank])
+            model, device_ids=[rank], output_device=rank)
 
     start_epoch = [1]
     start_iter = [0]
@@ -444,7 +448,8 @@ def train_and_eval(rank, n_gpus, hps):
         epoch_num_frames = 0
         epoch_frames_per_sec = 0.0
 
-        #train_loader.sampler.set_epoch(epoch)
+        if hps.train.distributed_run:
+            train_loader.sampler.set_epoch(epoch)
 
         accumulated_steps = 0
         iter_loss = 0
@@ -546,6 +551,7 @@ def train_and_eval(rank, n_gpus, hps):
                 epoch_energy_error += iter_energy_error
                 epoch_num_frames += iter_num_frames
                 epoch_frames_per_sec += iter_num_frames / iter_time
+                
                 if True:
                     iter_align_loss = iter_meta['align_loss'].item()
                     iter_attn_loss = iter_meta['attn_loss'].item()

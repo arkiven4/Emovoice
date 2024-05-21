@@ -16,7 +16,6 @@
     "kl_loss_weight": 1.0,
     "grad_clip_thresh": 1000.0,
     "distributed_run": false,
-    "num_gpus": 1,
     "batch_size": 32,
     "ddi": false,
     "fp16_run": false,
