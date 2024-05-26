@@ -155,7 +155,8 @@ def warm_start_model(checkpoint_path, model, ignore_layers):
     assert os.path.isfile(checkpoint_path)
     print("Warm starting model from checkpoint '{}'".format(checkpoint_path))
     checkpoint_dict = torch.load(checkpoint_path, map_location='cpu')
-    model_dict = checkpoint_dict['model']
+    #print(checkpoint_dict.keys())
+    model_dict = checkpoint_dict['state_dict']
 
     random_weight_layer = []
     mismatched_layers = []

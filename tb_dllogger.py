@@ -112,18 +112,14 @@ def prefix_format(timestamp):
 def init(log_fpath, log_dir, enabled=True, tb_subsets=[], **tb_kw):
 
     if enabled:
-        backends = [JSONStreamBackend(Verbosity.DEFAULT,
-                                      log_fpath),
-                    StdOutBackend(Verbosity.VERBOSE,
-                                  step_format=stdout_step_format,
-                                  metric_format=stdout_metric_format,
-                                  prefix_format=prefix_format)]
         # backends = [JSONStreamBackend(Verbosity.DEFAULT,
-        #                               log_fpath),]
-                    # StdOutBackend(Verbosity.VERBOSE,
-                    #               step_format=stdout_step_format,
-                    #               metric_format=stdout_metric_format,
-                    #               prefix_format=prefix_format)]
+        #                               log_fpath),
+        #             StdOutBackend(Verbosity.VERBOSE,
+        #                           step_format=stdout_step_format,
+        #                           metric_format=stdout_metric_format,
+        #                           prefix_format=prefix_format)]
+        backends = [JSONStreamBackend(Verbosity.DEFAULT,
+                                      log_fpath)]
     else:
         backends = []
 

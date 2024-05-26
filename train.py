@@ -24,6 +24,7 @@ import librosa
 
 from torch.optim import Adam
 from torch_optimizer import Lamb
+import bitsandbytes as bnb
 
 import tb_dllogger as logger
 
@@ -97,11 +98,14 @@ def plot_spectrograms(y, audiopaths, sorted_idx, step, n=4, label='Predicted spe
             mel_lens = y[2][idx].cpu().numpy()  # output_lengths
         else:
             mel_lens = y[1][idx].cpu().numpy().sum(axis=1) - 1
+    
+    index = 0
     for mel_spec, mel_len, fname in zip(mel_specs, mel_lens, fnames):
+        index = index + 1
         mel_spec = mel_spec[:, :mel_len]
         utt_id = os.path.splitext(os.path.basename(fname))[0]
         logger.log_spectrogram_tb(
-            step, '{}/{}'.format(label, utt_id), mel_spec, tb_subset='val')
+            step, '{}/{}'.format(label, str(index)), mel_spec, tb_subset='val')
 
 
 def generate_audio(y, audiopaths, sorted_idx, step, vocoder=None, sampling_rate=22050, hop_length=256,
@@ -164,13 +168,16 @@ def plot_attn_maps(y, audiopaths, sorted_idx, step, n=4, label='Predicted alignm
     attn_hard_durs = attn_hard_durs[idx].cpu().numpy()
     text_lens = np.count_nonzero(attn_hard_durs, 1)
     mel_lens = dec_mask[idx].cpu().numpy().squeeze(2).sum(1)
+
+    index = 0
     for attn_soft, attn_hard, mel_len, text_len, fname in zip(
             attn_softs, attn_hards, mel_lens, text_lens, fnames):
+        index = index + 1
         attn_soft = attn_soft[:,:mel_len,:text_len].squeeze(0).transpose()
         attn_hard = attn_hard[:,:mel_len,:text_len].squeeze(0).transpose()
         utt_id = os.path.splitext(os.path.basename(fname))[0]
         logger.log_attn_maps_tb(
-            step, '{}/{}'.format(label, utt_id), attn_soft, attn_hard, tb_subset='val')
+            step, '{}/{}'.format(label, str(index)), attn_soft, attn_hard, tb_subset='val')
 
 def reduce_tensor(tensor, num_gpus):
     rt = tensor.clone()
@@ -187,6 +194,15 @@ def adjust_learning_rate(total_iter, opt, learning_rate, warmup_iters=None):
 
     for param_group in opt.param_groups:
         param_group['lr'] = learning_rate * scale
+
+def adjust_learning_rate_myown(target_iter, current_iter, opt, start_lr=1e-3, end_lr=2e-4):
+    if current_iter >= target_iter:
+        scale = end_lr
+    else:
+        scale = start_lr - (current_iter / target_iter) * (start_lr - end_lr)
+
+    for param_group in opt.param_groups:
+        param_group['lr'] = scale
 
 def maybe_save_checkpoint(rank, model, ema_model, optimizer, scaler, epoch,
                         total_iter, config, hparams):
@@ -252,7 +268,7 @@ def validate(model, epoch, total_iter, criterion, valset, batch_size, collate_fn
                                 collate_fn=collate_fn)
         val_meta = defaultdict(float)
         val_num_frames = 0
-        for i, batch in enumerate(val_loader):
+        for i, batch in enumerate(tqdm(val_loader)):
             x, y, num_frames = batch_to_gpu(batch, collate_fn.symbol_type, mas=mas)
             y_pred = model(x, use_gt_durations=use_gt_durations, use_gt_pitch=False, use_gt_energy=False)
             loss, meta = criterion(y_pred, y, is_training=False, meta_agg='sum')
@@ -356,7 +372,7 @@ def train_and_eval(rank, n_gpus, hps):
     torch.manual_seed(hps.train.seed)
 
     trainset = TextMelAliLoader(audiopaths_and_text=hps.data.training_files, hparams=hps.data)
-    valset = TextMelAliLoader(audiopaths_and_text=hps.data.training_files, hparams=hps.data)
+    valset = TextMelAliLoader(audiopaths_and_text=hps.data.validation_files, hparams=hps.data)
 
     collate_fn = TextMelAliCollate(symbol_type='char', n_symbols=trainset.n_symbols, mas=True)
 
@@ -389,10 +405,12 @@ def train_and_eval(rank, n_gpus, hps):
     vocoder.eval()
     vocoder.remove_weight_norm()
     print("Succcess Load Vocoder")
+    #vocoder = None
 
-    kw = dict(lr=hps.train.learning_rate, betas=(0.9, 0.98), eps=1e-9, weight_decay=hps.train.learning_rate)
+    kw = dict(lr=hps.train.learning_rate, betas=(0.9, 0.998), eps=1e-9, weight_decay=hps.train.learning_rate)
     if hps.train.optimizer == 'adam':
-        optimizer = Adam(model.parameters(), **kw)
+        #optimizer = Adam(model.parameters(), **kw)
+        optimizer = bnb.optim.AdamW(model.parameters(), **kw )
     elif hps.train.optimizer == 'lamb':
         optimizer = Lamb(model.parameters(), **kw)
 
@@ -458,7 +476,7 @@ def train_and_eval(rank, n_gpus, hps):
 
         epoch_iter = 0
         num_iters = len(train_loader) // 1
-        for batch in train_loader:
+        for batch in tqdm(train_loader):
 
             if accumulated_steps == 0:
                 if epoch_iter == num_iters:
@@ -467,7 +485,8 @@ def train_and_eval(rank, n_gpus, hps):
                 epoch_iter += 1
                 iter_start_time = time.perf_counter()
 
-                adjust_learning_rate(total_iter, optimizer, hps.train.learning_rate, hps.train.warmup_steps)
+                #adjust_learning_rate(total_iter, optimizer, hps.train.learning_rate, hps.train.warmup_steps)
+                adjust_learning_rate_myown(600000, total_iter, optimizer, start_lr=hps.train.learning_rate, end_lr=2e-4)
 
                 model.zero_grad()
 
@@ -601,7 +620,7 @@ def train_and_eval(rank, n_gpus, hps):
             collate_fn, hps.train.distributed_run, batch_to_gpu, use_gt_durations=True,
             mas=True, attention_kl_loss=attention_kl_loss, kl_weight=kl_weight,
             vocoder=vocoder, sampling_rate=hps.data.sampling_rate, hop_length=hps.data.hop_length,
-            n_mel=hps.data.n_mel_channels, tvcgmm_k=0, audio_interval=1)
+            n_mel=hps.data.n_mel_channels, tvcgmm_k=0, audio_interval=5)
 
         print("====> Epoch: {}".format(epoch))
         maybe_save_checkpoint(rank, model, ema_model, optimizer, scaler, epoch, total_iter, hps, hps)

@@ -30,12 +30,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from modules import ConvReLUNorm, SeparableConv
+from modules import ConvReLUNorm, SeparableConv, LayerNorm2
 from commons import mask_from_lens
 from alignment import mas_width1
 from attentions import ConvAttention
 from transformer import FFTransformer
 
+from models_emocatch import EmoCatcher
 
 def regulate_len(durations, enc_out, pace=1.0, mel_max_len=None):
     """If target=None, then predicted durations are applied"""
@@ -97,6 +98,69 @@ class TemporalPredictor(nn.Module):
         out = self.fc(out) * enc_out_mask
         return out.squeeze(-1)
 
+class DurationPredictor(nn.Module):
+    """Glow-TTS duration prediction model.
+
+    ::
+
+        [2 x (conv1d_kxk -> relu -> layer_norm -> dropout)] -> conv1d_1x1 -> durs
+
+    Args:
+        in_channels (int): Number of channels of the input tensor.
+        hidden_channels (int): Number of hidden channels of the network.
+        kernel_size (int): Kernel size for the conv layers.
+        dropout_p (float): Dropout rate used after each conv layer.
+    """
+
+    def __init__(self, in_channels, hidden_channels, kernel_size, dropout_p, cond_channels=None, language_emb_dim=None):
+        super().__init__()
+
+        # add language embedding dim in the input
+        if language_emb_dim:
+            in_channels += language_emb_dim
+
+        # class arguments
+        self.in_channels = in_channels
+        self.filter_channels = hidden_channels
+        self.kernel_size = kernel_size
+        self.dropout_p = dropout_p
+        # layers
+        self.drop = nn.Dropout(dropout_p)
+        self.conv_1 = nn.Conv1d(in_channels, hidden_channels, kernel_size, padding=kernel_size // 2)
+        self.norm_1 = LayerNorm2(hidden_channels)
+        self.conv_2 = nn.Conv1d(hidden_channels, hidden_channels, kernel_size, padding=kernel_size // 2)
+        self.norm_2 = LayerNorm2(hidden_channels)
+        # output layer
+        self.proj = nn.Conv1d(hidden_channels, 1, 1)
+        if cond_channels is not None and cond_channels != 0:
+            self.cond = nn.Conv1d(cond_channels, in_channels, 1)
+
+        if language_emb_dim != 0 and language_emb_dim is not None:
+            self.cond_lang = nn.Conv1d(language_emb_dim, in_channels, 1)
+
+    def forward(self, x, x_mask, g=None, lang_emb=None):
+        """
+        Shapes:
+            - x: :math:`[B, C, T]`
+            - x_mask: :math:`[B, 1, T]`
+            - g: :math:`[B, C, 1]`
+        """
+        if g is not None:
+            x = x + self.cond(g)
+
+        if lang_emb is not None:
+            x = x + self.cond_lang(lang_emb)
+
+        x = self.conv_1(x * x_mask)
+        x = torch.relu(x)
+        x = self.norm_1(x)
+        x = self.drop(x)
+        x = self.conv_2(x * x_mask)
+        x = torch.relu(x)
+        x = self.norm_2(x)
+        x = self.drop(x)
+        x = self.proj(x * x_mask)
+        return x * x_mask
 
 class FastPitch(nn.Module):
     def __init__(self,
@@ -166,7 +230,11 @@ class FastPitch(nn.Module):
             lang_ids=None,
             lang_cond=['pre'],
             lang_emb_dim=384,
-            lang_emb_weight=1.0):
+            lang_emb_weight=1.0,
+            emocatch_model_path='',
+            emo_cond=['pre'],
+            emo_emb_dim=256,
+            emo_emb_weight=1.0):
         
         super(FastPitch, self).__init__()
 
@@ -195,6 +263,16 @@ class FastPitch(nn.Module):
         self.lang_emb = nn.Embedding(n_lang, symbols_embedding_dim)
         self.lang_emb_weight = lang_emb_weight
 
+        self.emo_proj = EmoCatcher(input_dim=80, hidden_dim=512, kernel_size=3, num_classes=5)
+        self.emo_proj.load_state_dict(torch.load(emocatch_model_path))
+        self.emo_proj.eval()
+        for param in self.emo_proj.parameters():
+            param.requires_grad = False
+        self.emo_cond = emo_cond
+        self.emo_emb = nn.Linear(emo_emb_dim, symbols_embedding_dim, bias=False)
+        self.emo_emb_weight = emo_emb_weight
+
+
         self.duration_predictor = TemporalPredictor(
             in_fft_output_size,
             filter_size=dur_predictor_filter_size,
@@ -203,6 +281,13 @@ class FastPitch(nn.Module):
             n_layers=dur_predictor_n_layers,
             sepconv=dur_predictor_sepconv or use_sepconv
         )
+
+        # self.duration_predictor = DurationPredictor(
+        #     in_fft_output_size,
+        #     dur_predictor_filter_size,
+        #     dur_predictor_kernel_size,
+        #     p_dur_predictor_dropout,
+        # )
 
         self.decoder = FFTransformer(
             n_layer=out_fft_n_layers, n_head=out_fft_n_heads,
@@ -218,22 +303,36 @@ class FastPitch(nn.Module):
             sepconv=out_fft_sepconv or use_sepconv
         )
 
-        self.pitch_predictor = TemporalPredictor(
+        # self.pitch_predictor = TemporalPredictor(
+        #     in_fft_output_size,
+        #     filter_size=pitch_predictor_filter_size,
+        #     kernel_size=pitch_predictor_kernel_size,
+        #     dropout=p_pitch_predictor_dropout,
+        #     n_layers=pitch_predictor_n_layers,
+        #     sepconv=pitch_predictor_sepconv or use_sepconv
+        # )
+
+        self.pitch_predictor = DurationPredictor(
             in_fft_output_size,
-            filter_size=pitch_predictor_filter_size,
-            kernel_size=pitch_predictor_kernel_size,
-            dropout=p_pitch_predictor_dropout,
-            n_layers=pitch_predictor_n_layers,
-            sepconv=pitch_predictor_sepconv or use_sepconv
+            pitch_predictor_filter_size,
+            pitch_predictor_kernel_size,
+            p_pitch_predictor_dropout,
         )
 
-        self.energy_predictor = TemporalPredictor(
+        # self.energy_predictor = TemporalPredictor(
+        #     in_fft_output_size,
+        #     filter_size=energy_predictor_filter_size,
+        #     kernel_size=energy_predictor_kernel_size,
+        #     dropout=p_energy_predictor_dropout,
+        #     n_layers=energy_predictor_n_layers,
+        #     sepconv=energy_predictor_sepconv or use_sepconv
+        # )
+
+        self.energy_predictor = DurationPredictor(
             in_fft_output_size,
-            filter_size=energy_predictor_filter_size,
-            kernel_size=energy_predictor_kernel_size,
-            dropout=p_energy_predictor_dropout,
-            n_layers=energy_predictor_n_layers,
-            sepconv=energy_predictor_sepconv or use_sepconv
+            energy_predictor_filter_size,
+            energy_predictor_kernel_size,
+            p_energy_predictor_dropout,
         )
 
         if pitch_embedding_sepconv or use_sepconv:
@@ -360,15 +459,17 @@ class FastPitch(nn.Module):
     def forward_mas(self, inputs, use_gt_pitch=True, use_gt_energy=True, pace=1.0, max_duration=75, use_gt_durations=None):  # compatibility
         (inputs, input_lens, mel_tgt, mel_lens, attn_prior, _, pitch_dense, energy_dense, speaker, language) = inputs
 
+        # 32, 80, 509
         text_max_len = inputs.size(1)
         mel_max_len = mel_tgt.size(2)
 
         # Calculate speaker and language embeddings
         cond_embs = {'pre': [], 'post': []}
 
+        # 32, 512
         if speaker is not None and self.speaker_cond:
             spk_emb = speaker if self.speaker_emb is None \
-                else self.speaker_emb(speaker).unsqueeze(1)
+                else self.speaker_emb(speaker).unsqueeze(1) # 32, 1, 384
             spk_emb.mul_(self.speaker_emb_weight)
             for pos in self.speaker_cond:
                 cond_embs[pos].append(spk_emb)
@@ -379,6 +480,13 @@ class FastPitch(nn.Module):
             lang_emb.mul_(self.lang_emb_weight)
             for pos in self.lang_cond:
                 cond_embs[pos].append(lang_emb)
+
+        if self.emo_cond:
+            _, emo_project_temp = self.emo_proj(mel_tgt.unsqueeze(1), mel_lens.cpu())
+            emo_emb = self.emo_emb(emo_project_temp).unsqueeze(1)
+            emo_emb.mul_(self.emo_emb_weight)
+            for pos in self.emo_cond:
+                cond_embs[pos].append(emo_emb)
 
         pre_cond = torch.sum(torch.stack(
             cond_embs['pre']), axis=0) if cond_embs['pre'] else None
@@ -394,10 +502,13 @@ class FastPitch(nn.Module):
         dur_pred = torch.clamp(torch.exp(log_dur_pred) - 1, 0, max_duration)
 
         # Predict pitch
-        pitch_pred = self.pitch_predictor(enc_out, enc_mask)
+        #pitch_pred = self.pitch_predictor(enc_out, enc_mask) # torch.Size([46, 116])
+        pitch_pred = self.pitch_predictor(enc_out.transpose(1, 2), enc_mask.transpose(1, 2)) # torch.Size([46, 1, 116])
+        pitch_pred = pitch_pred.squeeze(1)
 
         # Predict energy
-        energy_pred = self.energy_predictor(enc_out, enc_mask)
+        energy_pred = self.energy_predictor(enc_out.transpose(1, 2), enc_mask.transpose(1, 2))
+        energy_pred = energy_pred.squeeze(1)
 
         # Alignment
         text_emb = self.encoder.word_emb(inputs)

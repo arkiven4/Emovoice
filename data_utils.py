@@ -205,10 +205,12 @@ class TextMelAliLoader(torch.utils.data.Dataset):
         database_name = audiopath.split("/")[self.database_name_index]
 
         mel, energy = self.get_mel(audiopath)
+        energy = F.pad(input=torch.diff(energy), pad=(0, 1), mode='constant', value=0)
+
         text = self.get_text(text, lid)
         dur, text, start_time, end_time = self.get_duration(text, mel.size(-1))
         pitch = self.get_pitch(audiopath, dur, start_time, end_time, per_sym=self.pitch_char)
-
+        
         if self.trim_silence_dur is not None:
             text, mel, dur, pitch = self.trim_silence(
                 text, mel, dur, pitch, self.trim_silence_dur,
@@ -258,6 +260,9 @@ class TextMelAliLoader(torch.utils.data.Dataset):
         database_name = audiopath.split("/")[self.database_name_index]
         pitch = torch.from_numpy(np.load(f"{self.f0_embeds_path.replace('dataset_name', database_name)}/{filename}.npy"))
         pitch = pitch[:mel_len]
+        pitch[pitch == 0] = torch.nan
+        pitch = F.pad(input=torch.diff(pitch), pad=(0, 1), mode='constant', value=0)
+        pitch = torch.nan_to_num(pitch, nan=0.0)
         if pitch.shape[0] < mel_len:
             pitch = F.pad(input=pitch, pad=(0, mel_len - pitch.shape[0]), mode='constant', value=0)
 
