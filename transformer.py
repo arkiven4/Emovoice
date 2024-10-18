@@ -172,12 +172,16 @@ class FFTransformer(nn.Module):
     def __init__(self, n_layer, n_head, d_model, d_head, d_inner, kernel_size,
                  dropout, dropatt, dropemb=0.0, embed_input=True,
                  n_embed=None, d_embed=None, padding_idx=0, input_type=None,
-                 sepconv=False, pre_lnorm=False):
+                 sepconv=False, pre_lnorm=False, lang_emb_dim=0, g_emb_dim=0, emo_emb_dim=0):
         super(FFTransformer, self).__init__()
         self.d_model = d_model
         self.n_head = n_head
         self.d_head = d_head
         self.padding_idx = padding_idx
+        self.lang_emb_dim = lang_emb_dim
+        self.hidden_channels = d_embed
+        self.g_emb_dim = g_emb_dim
+        self.emo_emb_dim = emo_emb_dim
 
         self.input_type = input_type
         if embed_input:
@@ -201,7 +205,23 @@ class FFTransformer(nn.Module):
                     dropatt=dropatt, sepconv=sepconv, pre_lnorm=pre_lnorm)
             )
 
-    def forward(self, dec_inp, seq_lens=None, pre_cond=None, post_cond=None):
+        if emo_emb_dim != 0:
+            cond_layer = torch.nn.Conv1d(emo_emb_dim, 2 * self.hidden_channels * n_layer, 1)
+            self.cond_pre = torch.nn.Conv1d(self.hidden_channels, 2 * self.hidden_channels, 1)
+            self.cond_layer = torch.nn.utils.weight_norm(cond_layer, name="weight")
+
+        if g_emb_dim != 0:
+            cond_layer_g = torch.nn.Conv1d(g_emb_dim, 2 * self.hidden_channels * n_layer, 1)
+            self.cond_pre_g = torch.nn.Conv1d(self.hidden_channels, 2 * self.hidden_channels, 1)
+            self.cond_layer_g = torch.nn.utils.weight_norm(cond_layer_g, name="weight")
+
+    def forward(self, dec_inp, seq_lens=None, g=None, emo=None, pre_cond=None, post_cond=None):
+        if emo is not None:
+            emo = self.cond_layer(emo.transpose(1, 2))
+
+        if g is not None and self.word_emb is None:
+            g = self.cond_layer_g(g.transpose(1, 2))
+
         if self.word_emb is None:
             inp = dec_inp
             mask = mask_from_lens(seq_lens).unsqueeze(2)
@@ -218,12 +238,41 @@ class FFTransformer(nn.Module):
 
         if pre_cond is not None:
             inp = inp + pre_cond
+        
         out = self.drop(inp + pos_emb)
+        # if pre_cond is not None:
+        #     out = torch.cat((out, pre_cond.expand(out.size(0), out.size(1), -1)), dim=-1)
 
+        layer_count = 0
         for layer in self.layers:
-            out = layer(out, mask=mask)
+            if self.emo_emb_dim != 0:
+                out = self.cond_pre(out.transpose(1, 2))
+                cond_offset = layer_count * 2 * self.hidden_channels
+                emo_l = emo[:, cond_offset : cond_offset + 2 * self.hidden_channels, :]
+                out = fused_add_tanh_sigmoid_multiply(out, emo_l, torch.IntTensor([self.hidden_channels]))
+                out = out.transpose(1, 2)
 
-        if post_cond is not None:
-            out = out + post_cond
+            if self.g_emb_dim != 0:
+                out = self.cond_pre_g(out.transpose(1, 2))
+                cond_offset = layer_count * 2 * self.hidden_channels
+                g_l = g[:, cond_offset : cond_offset + 2 * self.hidden_channels, :]
+                out = fused_add_tanh_sigmoid_multiply(out, g_l, torch.IntTensor([self.hidden_channels]))
+                out = out.transpose(1, 2)
+
+            out = layer(out, mask=mask)
+            layer_count = layer_count + 1
+
+        if g is not None and self.word_emb:
+            out = torch.cat((out, g.expand(out.size(0), out.size(1), -1)), dim=-1)
+
         # out = self.drop(out)
         return out, mask
+
+
+def fused_add_tanh_sigmoid_multiply(input_a, input_b, n_channels):
+    n_channels_int = n_channels[0]
+    in_act = input_a + input_b
+    t_act = torch.tanh(in_act[:, :n_channels_int, :])
+    s_act = torch.sigmoid(in_act[:, n_channels_int:, :])
+    acts = t_act * s_act
+    return acts

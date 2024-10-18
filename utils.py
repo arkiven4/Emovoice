@@ -128,6 +128,16 @@ def get_hparams(init=True):
   hparams.model_dir = model_dir
   return hparams
 
+def get_hparams_from_dir(model_dir):
+  config_save_path = os.path.join(model_dir, "config.json")
+  with open(config_save_path, "r") as f:
+    data = f.read()
+  config = json.loads(data)
+
+  hparams =HParams(**config)
+  hparams.model_dir = model_dir
+  return hparams
+
 def latest_checkpoint_path(dir_path, regex="G_*.pth"):
   f_list = glob.glob(os.path.join(dir_path, regex))
   f_list.sort(key=lambda f: int("".join(filter(str.isdigit, f))))
@@ -198,7 +208,7 @@ def warm_start_model(checkpoint_path, model, ignore_layers):
     print("random_weight_layer")
     print(random_weight_layer)
     
-    ignore_layers = ignore_layers + mismatched_layers
+    ignore_layers = ignore_layers + mismatched_layers + random_weight_layer
     if len(ignore_layers) > 0:
         model_dict = {k: v for k, v in model_dict.items()
                       if k not in ignore_layers}

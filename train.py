@@ -369,6 +369,7 @@ def train_and_eval(rank, n_gpus, hps):
             backend="nccl", init_method="env://", world_size=n_gpus, rank=rank
         )
         print("Rank {}: Done initializing distributed training".format(rank))
+    
     torch.manual_seed(hps.train.seed)
 
     trainset = TextMelAliLoader(audiopaths_and_text=hps.data.training_files, hparams=hps.data)
@@ -440,9 +441,9 @@ def train_and_eval(rank, n_gpus, hps):
     attention_kl_loss = None  # for validation
 
     criterion = FastPitchMASLoss(
-        dur_predictor_loss_scale=0.1,
-        pitch_predictor_loss_scale=0.1,
-        energy_predictor_loss_scale=0.1,
+        dur_predictor_loss_scale=0.2,
+        pitch_predictor_loss_scale=0.5,
+        energy_predictor_loss_scale=0.5,
         attn_loss_scale=1.0)
     attention_kl_loss = commons.AttentionBinarizationLoss()  # L_bin
     
@@ -476,6 +477,8 @@ def train_and_eval(rank, n_gpus, hps):
 
         epoch_iter = 0
         num_iters = len(train_loader) // 1
+
+        model.train()
         for batch in tqdm(train_loader):
 
             if accumulated_steps == 0:
